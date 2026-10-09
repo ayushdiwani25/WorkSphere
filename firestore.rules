@@ -1,0 +1,105 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    
+    // Helper: Check if user is logged in
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    // Helper: Check if user document exists in the database
+    function isRegistered() {
+      return isAuthenticated() && exists(/databases/$(database)/documents/users/$(request.auth.uid));
+    }
+
+    // Helper: Get user's active role from the database
+    function getUserRole() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role;
+    }
+
+    // Helper: Check if user is Owner or Admin in the workspace
+    function isAdminOrOwner() {
+      return isRegistered() && (getUserRole() == 'Admin' || getUserRole() == 'Owner');
+    }
+
+    // Helper: Check if user is the creator/owner of a specific board
+    function isBoardOwner(bId) {
+      return isRegistered() && get(/databases/$(database)/documents/boards/$(bId)).data.ownerId == request.auth.uid;
+    }
+
+    // 1. Users collection rules
+    match /users/{userId} {
+      // Authenticated users can view team profiles (needed for registration checks & collaboration)
+      allow read: if isAuthenticated();
+      // Allow profile creation during sign-up (writing own profile) OR if they are Admin/Owner (inviting others)
+      allow create: if isAuthenticated() && (
+        request.auth.uid == userId || 
+        isAdminOrOwner()
+      );
+      // Allow update if they are updating their own profile (but prevent them from changing their own role),
+      // OR if they are an Owner or Admin.
+      allow update: if isAuthenticated() && (
+        isAdminOrOwner() || 
+        (request.auth.uid == userId && 
+         request.resource.data.role == resource.data.role)
+      );
+      // Only Owner/Admin can delete profiles
+      allow delete: if isAuthenticated() && isAdminOrOwner();
+    }
+
+    // 2. Boards rules
+    match /boards/{boardId} {
+      allow read: if isRegistered();
+      allow create: if isRegistered();
+      // Allow update/delete only if they are the board creator or an Owner/Admin
+      allow update, delete: if isRegistered() && (
+        resource.data.ownerId == request.auth.uid || 
+        isAdminOrOwner()
+      );
+    }
+
+    // 3. Stages rules
+    match /stages/{stageId} {
+      allow read: if isRegistered();
+      // Allow create/update of stages if the user is workspace Admin/Owner OR the board owner
+      allow create, update: if isRegistered() && (
+        isAdminOrOwner() || 
+        isBoardOwner(request.resource.data.boardId)
+      );
+      // Allow delete if Admin/Owner OR the board owner
+      allow delete: if isRegistered() && (
+        isAdminOrOwner() || 
+        isBoardOwner(resource.data.boardId)
+      );
+    }
+
+    // 4. Tasks rules
+    match /tasks/{taskId} {
+      allow read, write: if isRegistered();
+    }
+
+    // 5. Comments rules
+    match /comments/{commentId} {
+      allow read: if isRegistered();
+      // Ensure the author cannot spoof other email addresses when posting comments
+      allow create: if isRegistered() && request.resource.data.userEmail == request.auth.token.email;
+      // Allow update/delete if the user is the author or an Owner/Admin
+      allow update: if isRegistered() && (
+        (resource.data.userEmail == request.auth.token.email && request.resource.data.userEmail == resource.data.userEmail) || 
+        isAdminOrOwner()
+      );
+      allow delete: if isRegistered() && (
+        resource.data.userEmail == request.auth.token.email || 
+        isAdminOrOwner()
+      );
+    }
+
+    // 6. Activities (Logs) rules
+    match /activities/{activityId} {
+      allow read: if isRegistered();
+      // Ensure the logger cannot spoof user emails when writing activity logs
+      allow create: if isRegistered() && request.resource.data.userEmail == request.auth.token.email;
+      allow update, delete: if false; // Immutable logs
+    }
+  }
+}
